@@ -1,0 +1,135 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bio RAG assistant</title>
+<style>
+  :root { --bg:#f7f7f5; --fg:#1e2022; --muted:#61666b; --card:#fff; --line:#dfe1e3; --accent:#5a4fb3; --soft:#eeecfa; --mark:#fff1a8; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#131416; --fg:#e6e7e9; --muted:#9ba0a6; --card:#1b1c1f; --line:#2d2f33; --accent:#a59cf0; --soft:#24223a; --mark:#5a4f12; } }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:15px/1.6 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width:860px; margin:0 auto; padding:24px 16px 64px; }
+  h1 { font-size:1.6rem; margin:0 0 4px; } .lead { color:var(--muted); margin:0 0 18px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:16px; margin-bottom:14px; }
+  form { display:flex; gap:8px; flex-wrap:wrap; }
+  input[type=text], input[type=url] { flex:1 1 280px; font:inherit; padding:9px 12px; border:1px solid var(--line); border-radius:8px; background:var(--bg); color:var(--fg); }
+  .btn { background:var(--accent); color:#fff; border:0; border-radius:8px; padding:9px 16px; font:inherit; cursor:pointer; }
+  .chips { display:flex; flex-wrap:wrap; gap:6px; margin-top:10px; }
+  .chip { border:1px solid var(--line); background:var(--bg); color:var(--fg); border-radius:999px; padding:4px 10px; font-size:13px; cursor:pointer; }
+  .answer { font-size:1.02rem; }
+  .answer.abstain { color:var(--muted); font-style:italic; }
+  sup { color:var(--accent); font-weight:600; }
+  .hit { border-top:1px solid var(--line); padding:10px 0; }
+  .hit h3 { font-size:14px; margin:0 0 4px; } .hit .score { color:var(--muted); font-weight:400; font-size:12px; }
+  .hit p { margin:0; font-size:13.5px; color:var(--muted); }
+  mark { background:var(--mark); color:inherit; border-radius:3px; padding:0 1px; }
+  details summary { cursor:pointer; color:var(--muted); font-size:13px; }
+  .muted { color:var(--muted); font-size:13px; }
+  a { color:var(--accent); }
+</style>
+</head>
+<body>
+<main>
+  <h1>Bio RAG assistant</h1>
+  <p class="lead">Ask about genome assembly, transposable elements, RNA-seq, proteomics, image analysis or my projects. Retrieval (BM25, written from scratch) runs in your browser over 15 method notes. Without a server it answers extractively, quoting the best sentences; connected to the <a href="https://github.com/liuweisu/bio-rag-assistant">FastAPI service</a> it returns Claude's answer with citations.</p>
+
+  <section class="card">
+    <form id="ask">
+      <input type="text" id="q" placeholder="e.g. How can the age of an LTR retrotransposon be estimated?" aria-label="question" autocomplete="off">
+      <button class="btn">Ask</button>
+    </form>
+    <div class="chips" id="examples"></div>
+  </section>
+
+  <section class="card" id="result" hidden>
+    <div id="answer" class="answer"></div>
+    <p class="muted" id="mode"></p>
+    <div id="hits"></div>
+  </section>
+
+  <details class="card">
+    <summary>Connect to a deployed API (optional)</summary>
+    <p class="muted">Run <code>docker run -p 8000:8000 -e ANTHROPIC_API_KEY bio-rag-assistant</code> or deploy the container, then paste its URL. Stored only in this browser.</p>
+    <form id="api-form"><input type="url" id="api" placeholder="https://your-service.example.com"><button class="btn">Save</button></form>
+  </details>
+</main>
+<script>
+const $ = (id) => document.getElementById(id);
+const STOP = new Set(`a an and are as at be by for from has have how in is it its of on or that the this to was were which with what when where who why do does did can could would should their there these those than then into about between over under not no yes also so such very more most other some any each per via using use used`.split(/\s+/));
+const stem = (t) => { for (const s of ["ies", "es", "s"]) if (t.length > 4 && t.endsWith(s) && !t.endsWith("ss")) return t.slice(0, -s.length) + (s === "ies" ? "y" : ""); return t; };
+const tokenize = (s) => (s.toLowerCase().match(/[a-z0-9]+/g) || []).filter((t) => !STOP.has(t) && t.length > 1).map(stem);
+const esc = (s) => s.replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
+let index = null, maxIdf = 1;
+let API = ""; try { API = localStorage.getItem("biorag-api") || ""; } catch (e) {}
+$("api").value = API;
+
+function search(query, k = 4) {
+  const q = tokenize(query), { k1, b, avg_len, idf } = index;
+  return index.chunks.map((c, i) => {
+    let s = 0;
+    for (const t of q) { const f = c.tf[t] || 0; if (f) s += idf[t] * f * (k1 + 1) / (f + k1 * (1 - b + b * c.len / avg_len)); }
+    return { c, s };
+  }).filter((h) => h.s > 0).sort((x, y) => y.s - x.s).slice(0, k).map((h, r) => ({ ...h, rank: r + 1 }));
+}
+
+// same logic as ExtractiveAnswerer in src/biorag/generate.py
+function extractive(question, hits) {
+  const w = (t) => index.idf[t] ?? maxIdf, q = new Set(tokenize(question));
+  if (!hits.length || hits[0].s < 4) return null;
+  const top = new Set(tokenize(hits[0].c.title + " " + hits[0].c.text));
+  const cov = [...q].filter((t) => top.has(t)).reduce((a, t) => a + w(t), 0) / [...q].reduce((a, t) => a + w(t), 0);
+  if (cov < 0.6) return null;
+  const cands = [];
+  for (const h of hits.slice(0, 3)) for (const sent of h.c.text.replace(/\n/g, " ").split(/(?<!\bal\.)(?<=[.!?])\s+(?=[A-Z])/)) {
+    const st = new Set(tokenize(sent)); const weight = [...q].filter((t) => st.has(t)).reduce((a, t) => a + w(t), 0);
+    if (weight) cands.push({ score: weight / h.rank, sent: sent.trim(), h });
+  }
+  return cands.sort((a, b) => b.score - a.score).slice(0, 2);
+}
+
+function highlight(text, terms) {
+  return esc(text).replace(/[A-Za-z0-9]+/g, (w) => terms.has(stem(w.toLowerCase())) ? `<mark>${w}</mark>` : w);
+}
+
+function renderHits(hits, terms) {
+  $("hits").innerHTML = `<p class="muted" style="margin-top:14px">Retrieved passages</p>` + hits.map((h) =>
+    `<div class="hit"><h3>${h.rank}. ${esc(h.c.title)} <span class="score">BM25 ${h.s.toFixed(2)}</span></h3><p>${highlight(h.c.text, terms)}</p></div>`).join("");
+}
+
+async function ask(question) {
+  $("result").hidden = false;
+  const hits = search(question), terms = new Set(tokenize(question));
+  renderHits(hits, terms);
+  if (API) {
+    $("answer").className = "answer"; $("answer").textContent = "Asking Claude…"; $("mode").textContent = "";
+    try {
+      const r = await fetch(API.replace(/\/$/, "") + "/ask", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ question }) });
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      const d = await r.json();
+      $("answer").className = "answer" + (d.abstained ? " abstain" : "");
+      $("answer").innerHTML = esc(d.answer) + (d.citations.length ? "<ol class='muted'>" + d.citations.map((c) => `<li>“${esc(c.quote)}” — ${esc(c.title)}</li>`).join("") + "</ol>" : "");
+      $("mode").textContent = `Answered by ${d.model} via ${API}`;
+      return;
+    } catch (e) { $("mode").textContent = `API not reachable (${e.message}); showing the offline answer.`; }
+  }
+  const best = extractive(question, hits);
+  if (!best) { $("answer").className = "answer abstain"; $("answer").textContent = "I could not find this in the notes."; }
+  else {
+    $("answer").className = "answer";
+    $("answer").innerHTML = best.map((x) => `${esc(x.sent)}<sup>${x.h.rank}</sup>`).join(" ");
+  }
+  if (!API) $("mode").textContent = "Offline extractive answer: the best-matching sentences, numbered by the passage they come from.";
+}
+
+$("ask").onsubmit = (e) => { e.preventDefault(); const q = $("q").value.trim(); if (q && index) ask(q); };
+$("api-form").onsubmit = (e) => { e.preventDefault(); API = $("api").value.trim(); try { localStorage.setItem("biorag-api", API); } catch (err) {} };
+const EXAMPLES = ["How can the age of an LTR retrotransposon be estimated?", "Which TE insertion causes neurofibromatosis type 1?",
+  "How are touching nuclei separated?", "How does DESeq2 normalise library sizes?", "What does LaMa use to get a global receptive field?",
+  "What annealing temperature should I use for my PCR primers?"];
+$("examples").innerHTML = EXAMPLES.map((q) => `<button class="chip">${esc(q)}</button>`).join("");
+document.querySelectorAll(".chip").forEach((b) => b.onclick = () => { $("q").value = b.textContent; ask(b.textContent); });
+fetch("index.json").then((r) => r.json()).then((d) => { index = d; maxIdf = Math.max(...Object.values(d.idf)); });
+</script>
+</body>
+</html>
