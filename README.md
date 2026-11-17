@@ -3,6 +3,8 @@
 [![CI](https://github.com/liuweisu/bio-rag-assistant/actions/workflows/ci.yml/badge.svg)](https://github.com/liuweisu/bio-rag-assistant/actions/workflows/ci.yml)
 **[Try the search and offline answers in your browser](https://liuweisu.github.io/bio-rag-assistant/)**
 
+> **About this repository.** This is a showcase of work I did during my studies at Wageningen University & Research (WUR). The original research and course code lives on WUR's internal GitLab and is not public. The code here was rebuilt quickly with help from Claude, an AI assistant, to show the methods and results; it is not the original thesis or course code.
+
 A retrieval-augmented generation (RAG) assistant that answers bioinformatics questions from a set of method notes and cites the exact passage behind each statement. When the notes do not contain the answer, it says so.
 
 It covers the parts of an AI engineering job that are not the model itself: retrieval, grounding, evaluation, an API, a container, tests and CI.
